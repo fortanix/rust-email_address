@@ -809,7 +809,7 @@ impl EmailAddress {
     ///
     pub fn local_part(&self) -> &str {
         let (local, _, _) = split_parts(&self.0).unwrap();
-        local
+        trim_cfws(local).unwrap()
     }
 
     ///
@@ -846,8 +846,7 @@ impl EmailAddress {
     /// ```
     ///
     pub fn email(&self) -> String {
-        let (local, domain, _) = split_parts(&self.0).unwrap();
-        format!("{}{AT}{}", local, domain)
+        format!("{}{AT}{}", self.local_part(), self.domain())
     }
 
     ///
@@ -866,7 +865,7 @@ impl EmailAddress {
     ///
     pub fn domain(&self) -> &str {
         let (_, domain, _) = split_parts(&self.0).unwrap();
-        domain
+        trim_cfws(domain).unwrap()
     }
 
     ///
@@ -992,6 +991,8 @@ fn split_at(address: &str) -> Result<(&str, &str), Error> {
 }
 
 fn parse_local_part(part: &str, _: Options) -> Result<(), Error> {
+    let part = trim_cfws(part)?;
+
     if part.is_empty() {
         Error::LocalPartEmpty.into()
     } else if part.len() > LOCAL_PART_MAX_LENGTH {
@@ -1025,6 +1026,8 @@ fn parse_unquoted_local_part(part: &str) -> Result<(), Error> {
 }
 
 fn parse_domain(part: &str, options: Options) -> Result<(), Error> {
+    let part = trim_cfws(part)?;
+
     if part.is_empty() {
         Error::DomainEmpty.into()
     } else if part.len() > DOMAIN_MAX_LENGTH {
@@ -1089,6 +1092,128 @@ fn parse_literal_domain(part: &str) -> Result<(), Error> {
         return Ok(());
     }
     Error::InvalidCharacter.into()
+}
+
+fn trim_cfws(part: &str) -> Result<&str, Error> {
+    let comments = comment_ranges(part)?;
+    let mut start = 0;
+    let mut end = part.len();
+
+    loop {
+        let next_start = trim_cfws_start(part, &comments, start, end);
+        let next_end = trim_cfws_end(part, &comments, next_start, end);
+
+        if next_start == start && next_end == end {
+            break;
+        }
+
+        start = next_start;
+        end = next_end;
+    }
+
+    Ok(&part[start..end])
+}
+
+fn trim_cfws_start(part: &str, comments: &[(usize, usize)], mut start: usize, end: usize) -> usize {
+    while start < end {
+        if let Some(c) = part[start..end].chars().next() {
+            if is_wsp(c) {
+                start += c.len_utf8();
+                continue;
+            }
+        }
+
+        if let Some((_, comment_end)) = comments
+            .iter()
+            .find(|(comment_start, comment_end)| *comment_start == start && *comment_end <= end)
+        {
+            start = *comment_end;
+            continue;
+        }
+
+        break;
+    }
+
+    start
+}
+
+fn trim_cfws_end(part: &str, comments: &[(usize, usize)], start: usize, mut end: usize) -> usize {
+    while start < end {
+        if let Some((last_start, c)) = part[..end].char_indices().next_back() {
+            if last_start >= start && is_wsp(c) {
+                end = last_start;
+                continue;
+            }
+        }
+
+        if let Some((comment_start, _)) = comments
+            .iter()
+            .find(|(comment_start, comment_end)| *comment_start >= start && *comment_end == end)
+        {
+            end = *comment_start;
+            continue;
+        }
+
+        break;
+    }
+
+    end
+}
+
+fn comment_ranges(part: &str) -> Result<Vec<(usize, usize)>, Error> {
+    let mut comments = Vec::new();
+    let mut index = 0;
+
+    while index < part.len() {
+        let c = part[index..]
+            .chars()
+            .next()
+            .expect("index is on a char boundary");
+
+        if c == LPAREN {
+            let comment_end = parse_comment(part, index)?;
+            comments.push((index, comment_end));
+            index = comment_end;
+        } else {
+            index += c.len_utf8();
+        }
+    }
+
+    Ok(comments)
+}
+
+fn parse_comment(part: &str, start: usize) -> Result<usize, Error> {
+    let mut depth = 1;
+    let mut escaped = false;
+    let mut chars = part[start + LPAREN.len_utf8()..].char_indices();
+
+    while let Some((relative_index, c)) = chars.next() {
+        let index = start + LPAREN.len_utf8() + relative_index;
+
+        if escaped {
+            if is_vchar(c) || is_wsp(c) {
+                escaped = false;
+                continue;
+            }
+
+            return Error::InvalidComment.into();
+        }
+
+        if c == ESC {
+            escaped = true;
+        } else if c == LPAREN {
+            depth += 1;
+        } else if c == RPAREN {
+            depth -= 1;
+            if depth == 0 {
+                return Ok(index + RPAREN.len_utf8());
+            }
+        } else if !(is_wsp(c) || is_ctext_char(c)) {
+            return Error::InvalidComment.into();
+        }
+    }
+
+    Error::InvalidComment.into()
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -1174,12 +1299,12 @@ fn is_dtext_char(c: char) -> bool {
     ('\x21'..='\x5A').contains(&c) || ('\x5E'..='\x7E').contains(&c) || !c.is_ascii()
 }
 
-//fn is_ctext_char(c: char) -> bool {
-//    (c >= '\x21' && c == '\x27')
-//        || ('\x2A'..='\x5B').contains(&c)
-//        || ('\x5D'..='\x7E').contains(&c)
-//        || !c.is_ascii()
-//}
+fn is_ctext_char(c: char) -> bool {
+    ('\x21'..='\x27').contains(&c)
+        || ('\x2A'..='\x5B').contains(&c)
+        || ('\x5D'..='\x7E').contains(&c)
+        || !c.is_ascii()
+}
 //
 //fn is_ctext(s: &str) -> bool {
 //    s.chars().all(is_ctext_char)
@@ -1405,6 +1530,26 @@ mod tests {
         assert_eq!(email.display_part(), "");
         assert_eq!(email.local_part(), "\"User <user@example.com>\"");
         assert_eq!(email.domain(), "example.com");
+    }
+
+    #[test]
+    fn test_addr_spec_with_comments() {
+        let email = EmailAddress::from_str("user(my account)@example.com(my domain)").unwrap();
+
+        assert_eq!(email.display_part(), "");
+        assert_eq!(email.local_part(), "user");
+        assert_eq!(email.domain(), "example.com");
+        assert_eq!(email.email(), "user@example.com");
+        assert_eq!(email.as_str(), "user(my account)@example.com(my domain)");
+    }
+
+    #[test]
+    fn test_addr_spec_with_nested_comments() {
+        let email = EmailAddress::from_str("(outer (inner)) user @ example.com (domain)").unwrap();
+
+        assert_eq!(email.local_part(), "user");
+        assert_eq!(email.domain(), "example.com");
+        assert_eq!(email.email(), "user@example.com");
     }
 
     #[test]
@@ -1837,6 +1982,15 @@ mod tests {
             Options::default().without_domain_literal(),
             Error::UnsupportedDomainLiteral,
             Some("unsupported domain literal (4)"),
+        );
+    }
+
+    #[test]
+    fn test_bad_example_21() {
+        expect(
+            "user(my account@example.com",
+            Error::InvalidComment,
+            Some("comment is missing closing parenthesis"),
         );
     }
 
