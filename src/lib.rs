@@ -424,6 +424,30 @@ pub struct Options {
     /// ```
     ///
     pub allow_display_text: bool,
+
+    ///
+    /// Specifies if the maximum length of the local part is checked. Defaults to `true`.
+    ///
+    /// The checked limit is 64 octets, as specified by
+    /// [RFC 5321 section 4.5.3.1.1](https://datatracker.ietf.org/doc/html/rfc5321#section-4.5.3.1.1).
+    ///
+    pub check_local_part_max_length: bool,
+
+    ///
+    /// Specifies if the maximum length of the domain is checked. Defaults to `true`.
+    ///
+    /// The checked limit is 254 octets, as specified by
+    /// [RFC 5321 section 4.5.3.1.2](https://datatracker.ietf.org/doc/html/rfc5321#section-4.5.3.1.2).
+    ///
+    pub check_domain_max_length: bool,
+
+    ///
+    /// Specifies if the maximum length of each domain label is checked. Defaults to `true`.
+    ///
+    /// The checked limit is 63 octets, as specified by
+    /// [RFC 1034 section 3.5](https://datatracker.ietf.org/doc/html/rfc1034#section-3.5).
+    ///
+    pub check_domain_label_max_length: bool,
 }
 
 ///
@@ -442,7 +466,7 @@ pub struct EmailAddress(String);
 const LOCAL_PART_MAX_LENGTH: usize = 64;
 // see: https://www.rfc-editor.org/errata_search.php?rfc=3696&eid=1690
 const DOMAIN_MAX_LENGTH: usize = 254;
-const SUB_DOMAIN_MAX_LENGTH: usize = 63;
+const DOMAIN_LABEL_MAX_LENGTH: usize = 63;
 
 #[allow(dead_code)]
 const CR: char = '\r';
@@ -487,8 +511,8 @@ impl Display for Error {
             Error::SubDomainEmpty => write!(f, "A sub-domain is empty."),
             Error::SubDomainTooLong => write!(
                 f,
-                "A sub-domain is too long. Length limit: {}",
-                SUB_DOMAIN_MAX_LENGTH
+                "A domain label is too long. Length limit: {}",
+                DOMAIN_LABEL_MAX_LENGTH
             ),
             Error::MissingSeparator => write!(f, "Missing separator character '{}'.", AT),
             Error::DomainTooFew => write!(f, "Too few parts in the domain"),
@@ -525,6 +549,9 @@ impl Default for Options {
             minimum_sub_domains: Default::default(),
             allow_domain_literal: true,
             allow_display_text: true,
+            check_local_part_max_length: true,
+            check_domain_max_length: true,
+            check_domain_label_max_length: true,
         }
     }
 }
@@ -584,6 +611,54 @@ impl Options {
     pub const fn without_display_text(self) -> Self {
         Self {
             allow_display_text: false,
+            ..self
+        }
+    }
+    /// Set the value of `check_local_part_max_length` to `true`.
+    #[inline(always)]
+    pub const fn with_local_part_max_length(self) -> Self {
+        Self {
+            check_local_part_max_length: true,
+            ..self
+        }
+    }
+    /// Set the value of `check_local_part_max_length` to `false`.
+    #[inline(always)]
+    pub const fn without_local_part_max_length(self) -> Self {
+        Self {
+            check_local_part_max_length: false,
+            ..self
+        }
+    }
+    /// Set the value of `check_domain_max_length` to `true`.
+    #[inline(always)]
+    pub const fn with_domain_max_length(self) -> Self {
+        Self {
+            check_domain_max_length: true,
+            ..self
+        }
+    }
+    /// Set the value of `check_domain_max_length` to `false`.
+    #[inline(always)]
+    pub const fn without_domain_max_length(self) -> Self {
+        Self {
+            check_domain_max_length: false,
+            ..self
+        }
+    }
+    /// Set the value of `check_domain_label_max_length` to `true`.
+    #[inline(always)]
+    pub const fn with_domain_label_max_length(self) -> Self {
+        Self {
+            check_domain_label_max_length: true,
+            ..self
+        }
+    }
+    /// Set the value of `check_domain_label_max_length` to `false`.
+    #[inline(always)]
+    pub const fn without_domain_label_max_length(self) -> Self {
+        Self {
+            check_domain_label_max_length: false,
             ..self
         }
     }
@@ -990,12 +1065,12 @@ fn split_at(address: &str) -> Result<(&str, &str), Error> {
     }
 }
 
-fn parse_local_part(part: &str, _: Options) -> Result<(), Error> {
+fn parse_local_part(part: &str, options: Options) -> Result<(), Error> {
     let part = trim_cfws(part)?;
 
     if part.is_empty() {
         Error::LocalPartEmpty.into()
-    } else if part.len() > LOCAL_PART_MAX_LENGTH {
+    } else if options.check_local_part_max_length && part.len() > LOCAL_PART_MAX_LENGTH {
         Error::LocalPartTooLong.into()
     } else if part.starts_with(DQUOTE) && part.ends_with(DQUOTE) {
         // <= to handle `part` = `"` (single quote).
@@ -1030,7 +1105,7 @@ fn parse_domain(part: &str, options: Options) -> Result<(), Error> {
 
     if part.is_empty() {
         Error::DomainEmpty.into()
-    } else if part.len() > DOMAIN_MAX_LENGTH {
+    } else if options.check_domain_max_length && part.len() > DOMAIN_MAX_LENGTH {
         Error::DomainTooLong.into()
     } else if part.starts_with(LBRACKET) && part.ends_with(RBRACKET) {
         if options.allow_domain_literal {
@@ -1069,7 +1144,7 @@ fn parse_text_domain(part: &str, options: Options) -> Result<(), Error> {
             return Error::InvalidCharacter.into();
         }
 
-        if sub_part.len() > SUB_DOMAIN_MAX_LENGTH {
+        if options.check_domain_label_max_length && sub_part.len() > DOMAIN_LABEL_MAX_LENGTH {
             return Error::SubDomainTooLong.into();
         }
 
@@ -1799,11 +1874,50 @@ mod tests {
     }
 
     #[test]
+    fn test_local_part_max_length_can_be_disabled() {
+        valid_with_options(
+            "1234567890123456789012345678901234567890123456789012345678901234+x@example.com",
+            Options::default().without_local_part_max_length(),
+            Some("local part max length check disabled"),
+        );
+    }
+
+    #[test]
     fn test_bad_example_01() {
         expect(
             "foo@example.v1234567890123456789012345678901234567890123456789012345678901234v.com",
             Error::SubDomainTooLong,
             Some("domain part is longer than 64 characters"),
+        );
+    }
+
+    #[test]
+    fn test_domain_label_max_length_can_be_disabled() {
+        valid_with_options(
+            "foo@example.v1234567890123456789012345678901234567890123456789012345678901234v.com",
+            Options::default().without_domain_label_max_length(),
+            Some("domain label max length check disabled"),
+        );
+    }
+
+    #[test]
+    fn test_domain_max_length_can_be_disabled() {
+        let long_domain = "a".repeat(DOMAIN_LABEL_MAX_LENGTH);
+        let address = format!(
+            "foo@{}.{}.{}.{}.com",
+            long_domain, long_domain, long_domain, long_domain
+        );
+
+        expect_with_options(
+            &address,
+            Options::default(),
+            Error::DomainTooLong,
+            Some("domain part is longer than 254 characters"),
+        );
+        valid_with_options(
+            &address,
+            Options::default().without_domain_max_length(),
+            Some("domain max length check disabled"),
         );
     }
 
