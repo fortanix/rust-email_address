@@ -424,6 +424,30 @@ pub struct Options {
     /// ```
     ///
     pub allow_display_text: bool,
+
+    ///
+    /// Specifies if the maximum length of the local part is checked. Defaults to `true`.
+    ///
+    /// The checked limit is 64 octets, as specified by
+    /// [RFC 5321 section 4.5.3.1.1](https://datatracker.ietf.org/doc/html/rfc5321#section-4.5.3.1.1).
+    ///
+    pub check_local_part_max_length: bool,
+
+    ///
+    /// Specifies if the maximum length of the domain is checked. Defaults to `true`.
+    ///
+    /// The checked limit is 254 octets, as specified by
+    /// [RFC 5321 section 4.5.3.1.2](https://datatracker.ietf.org/doc/html/rfc5321#section-4.5.3.1.2).
+    ///
+    pub check_domain_max_length: bool,
+
+    ///
+    /// Specifies if the maximum length of each domain label is checked. Defaults to `true`.
+    ///
+    /// The checked limit is 63 octets, as specified by
+    /// [RFC 1034 section 3.5](https://datatracker.ietf.org/doc/html/rfc1034#section-3.5).
+    ///
+    pub check_domain_label_max_length: bool,
 }
 
 ///
@@ -442,7 +466,7 @@ pub struct EmailAddress(String);
 const LOCAL_PART_MAX_LENGTH: usize = 64;
 // see: https://www.rfc-editor.org/errata_search.php?rfc=3696&eid=1690
 const DOMAIN_MAX_LENGTH: usize = 254;
-const SUB_DOMAIN_MAX_LENGTH: usize = 63;
+const DOMAIN_LABEL_MAX_LENGTH: usize = 63;
 
 #[allow(dead_code)]
 const CR: char = '\r';
@@ -487,8 +511,8 @@ impl Display for Error {
             Error::SubDomainEmpty => write!(f, "A sub-domain is empty."),
             Error::SubDomainTooLong => write!(
                 f,
-                "A sub-domain is too long. Length limit: {}",
-                SUB_DOMAIN_MAX_LENGTH
+                "A domain label is too long. Length limit: {}",
+                DOMAIN_LABEL_MAX_LENGTH
             ),
             Error::MissingSeparator => write!(f, "Missing separator character '{}'.", AT),
             Error::DomainTooFew => write!(f, "Too few parts in the domain"),
@@ -525,6 +549,9 @@ impl Default for Options {
             minimum_sub_domains: Default::default(),
             allow_domain_literal: true,
             allow_display_text: true,
+            check_local_part_max_length: true,
+            check_domain_max_length: true,
+            check_domain_label_max_length: true,
         }
     }
 }
@@ -584,6 +611,54 @@ impl Options {
     pub const fn without_display_text(self) -> Self {
         Self {
             allow_display_text: false,
+            ..self
+        }
+    }
+    /// Set the value of `check_local_part_max_length` to `true`.
+    #[inline(always)]
+    pub const fn with_local_part_max_length(self) -> Self {
+        Self {
+            check_local_part_max_length: true,
+            ..self
+        }
+    }
+    /// Set the value of `check_local_part_max_length` to `false`.
+    #[inline(always)]
+    pub const fn without_local_part_max_length(self) -> Self {
+        Self {
+            check_local_part_max_length: false,
+            ..self
+        }
+    }
+    /// Set the value of `check_domain_max_length` to `true`.
+    #[inline(always)]
+    pub const fn with_domain_max_length(self) -> Self {
+        Self {
+            check_domain_max_length: true,
+            ..self
+        }
+    }
+    /// Set the value of `check_domain_max_length` to `false`.
+    #[inline(always)]
+    pub const fn without_domain_max_length(self) -> Self {
+        Self {
+            check_domain_max_length: false,
+            ..self
+        }
+    }
+    /// Set the value of `check_domain_label_max_length` to `true`.
+    #[inline(always)]
+    pub const fn with_domain_label_max_length(self) -> Self {
+        Self {
+            check_domain_label_max_length: true,
+            ..self
+        }
+    }
+    /// Set the value of `check_domain_label_max_length` to `false`.
+    #[inline(always)]
+    pub const fn without_domain_label_max_length(self) -> Self {
+        Self {
+            check_domain_label_max_length: false,
             ..self
         }
     }
@@ -809,7 +884,7 @@ impl EmailAddress {
     ///
     pub fn local_part(&self) -> &str {
         let (local, _, _) = split_parts(&self.0).unwrap();
-        local
+        trim_cfws(local).unwrap()
     }
 
     ///
@@ -846,8 +921,7 @@ impl EmailAddress {
     /// ```
     ///
     pub fn email(&self) -> String {
-        let (local, domain, _) = split_parts(&self.0).unwrap();
-        format!("{}{AT}{}", local, domain)
+        format!("{}{AT}{}", self.local_part(), self.domain())
     }
 
     ///
@@ -866,7 +940,7 @@ impl EmailAddress {
     ///
     pub fn domain(&self) -> &str {
         let (_, domain, _) = split_parts(&self.0).unwrap();
-        domain
+        trim_cfws(domain).unwrap()
     }
 
     ///
@@ -944,9 +1018,11 @@ fn split_parts(address: &str) -> Result<(&str, &str, &str), Error> {
 }
 
 fn split_display_email(text: &str) -> Result<(&str, &str), Error> {
-    match text.rsplit_once(DISPLAY_SEP) {
+    match find_display_separator(text) {
         None => Ok(("", text)),
-        Some((left, right)) => {
+        Some(index) => {
+            let left = &text[..index];
+            let right = &text[index + DISPLAY_SEP.len()..];
             let right = right.trim();
             if !right.ends_with(DISPLAY_END) {
                 Err(Error::MissingEndBracket)
@@ -960,6 +1036,28 @@ fn split_display_email(text: &str) -> Result<(&str, &str), Error> {
     }
 }
 
+fn find_display_separator(text: &str) -> Option<usize> {
+    let mut in_quote = false;
+    let mut escaped = false;
+    let mut separator = None;
+
+    for (index, c) in text.char_indices() {
+        if !in_quote && text[index..].starts_with(DISPLAY_SEP) {
+            separator = Some(index);
+        }
+
+        if escaped {
+            escaped = false;
+        } else if in_quote && c == ESC {
+            escaped = true;
+        } else if c == DQUOTE {
+            in_quote = !in_quote;
+        }
+    }
+
+    separator
+}
+
 fn split_at(address: &str) -> Result<(&str, &str), Error> {
     match address.rsplit_once(AT) {
         None => Error::MissingSeparator.into(),
@@ -967,10 +1065,12 @@ fn split_at(address: &str) -> Result<(&str, &str), Error> {
     }
 }
 
-fn parse_local_part(part: &str, _: Options) -> Result<(), Error> {
+fn parse_local_part(part: &str, options: Options) -> Result<(), Error> {
+    let part = trim_cfws(part)?;
+
     if part.is_empty() {
         Error::LocalPartEmpty.into()
-    } else if part.len() > LOCAL_PART_MAX_LENGTH {
+    } else if options.check_local_part_max_length && part.len() > LOCAL_PART_MAX_LENGTH {
         Error::LocalPartTooLong.into()
     } else if part.starts_with(DQUOTE) && part.ends_with(DQUOTE) {
         // <= to handle `part` = `"` (single quote).
@@ -1001,9 +1101,11 @@ fn parse_unquoted_local_part(part: &str) -> Result<(), Error> {
 }
 
 fn parse_domain(part: &str, options: Options) -> Result<(), Error> {
+    let part = trim_cfws(part)?;
+
     if part.is_empty() {
         Error::DomainEmpty.into()
-    } else if part.len() > DOMAIN_MAX_LENGTH {
+    } else if options.check_domain_max_length && part.len() > DOMAIN_MAX_LENGTH {
         Error::DomainTooLong.into()
     } else if part.starts_with(LBRACKET) && part.ends_with(RBRACKET) {
         if options.allow_domain_literal {
@@ -1042,7 +1144,7 @@ fn parse_text_domain(part: &str, options: Options) -> Result<(), Error> {
             return Error::InvalidCharacter.into();
         }
 
-        if sub_part.len() > SUB_DOMAIN_MAX_LENGTH {
+        if options.check_domain_label_max_length && sub_part.len() > DOMAIN_LABEL_MAX_LENGTH {
             return Error::SubDomainTooLong.into();
         }
 
@@ -1065,6 +1167,128 @@ fn parse_literal_domain(part: &str) -> Result<(), Error> {
         return Ok(());
     }
     Error::InvalidCharacter.into()
+}
+
+fn trim_cfws(part: &str) -> Result<&str, Error> {
+    let comments = comment_ranges(part)?;
+    let mut start = 0;
+    let mut end = part.len();
+
+    loop {
+        let next_start = trim_cfws_start(part, &comments, start, end);
+        let next_end = trim_cfws_end(part, &comments, next_start, end);
+
+        if next_start == start && next_end == end {
+            break;
+        }
+
+        start = next_start;
+        end = next_end;
+    }
+
+    Ok(&part[start..end])
+}
+
+fn trim_cfws_start(part: &str, comments: &[(usize, usize)], mut start: usize, end: usize) -> usize {
+    while start < end {
+        if let Some(c) = part[start..end].chars().next() {
+            if is_wsp(c) {
+                start += c.len_utf8();
+                continue;
+            }
+        }
+
+        if let Some((_, comment_end)) = comments
+            .iter()
+            .find(|(comment_start, comment_end)| *comment_start == start && *comment_end <= end)
+        {
+            start = *comment_end;
+            continue;
+        }
+
+        break;
+    }
+
+    start
+}
+
+fn trim_cfws_end(part: &str, comments: &[(usize, usize)], start: usize, mut end: usize) -> usize {
+    while start < end {
+        if let Some((last_start, c)) = part[..end].char_indices().next_back() {
+            if last_start >= start && is_wsp(c) {
+                end = last_start;
+                continue;
+            }
+        }
+
+        if let Some((comment_start, _)) = comments
+            .iter()
+            .find(|(comment_start, comment_end)| *comment_start >= start && *comment_end == end)
+        {
+            end = *comment_start;
+            continue;
+        }
+
+        break;
+    }
+
+    end
+}
+
+fn comment_ranges(part: &str) -> Result<Vec<(usize, usize)>, Error> {
+    let mut comments = Vec::new();
+    let mut index = 0;
+
+    while index < part.len() {
+        let c = part[index..]
+            .chars()
+            .next()
+            .expect("index is on a char boundary");
+
+        if c == LPAREN {
+            let comment_end = parse_comment(part, index)?;
+            comments.push((index, comment_end));
+            index = comment_end;
+        } else {
+            index += c.len_utf8();
+        }
+    }
+
+    Ok(comments)
+}
+
+fn parse_comment(part: &str, start: usize) -> Result<usize, Error> {
+    let mut depth = 1;
+    let mut escaped = false;
+    let mut chars = part[start + LPAREN.len_utf8()..].char_indices();
+
+    while let Some((relative_index, c)) = chars.next() {
+        let index = start + LPAREN.len_utf8() + relative_index;
+
+        if escaped {
+            if is_vchar(c) || is_wsp(c) {
+                escaped = false;
+                continue;
+            }
+
+            return Error::InvalidComment.into();
+        }
+
+        if c == ESC {
+            escaped = true;
+        } else if c == LPAREN {
+            depth += 1;
+        } else if c == RPAREN {
+            depth -= 1;
+            if depth == 0 {
+                return Ok(index + RPAREN.len_utf8());
+            }
+        } else if !(is_wsp(c) || is_ctext_char(c)) {
+            return Error::InvalidComment.into();
+        }
+    }
+
+    Error::InvalidComment.into()
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -1150,12 +1374,12 @@ fn is_dtext_char(c: char) -> bool {
     ('\x21'..='\x5A').contains(&c) || ('\x5E'..='\x7E').contains(&c) || !c.is_ascii()
 }
 
-//fn is_ctext_char(c: char) -> bool {
-//    (c >= '\x21' && c == '\x27')
-//        || ('\x2A'..='\x5B').contains(&c)
-//        || ('\x5D'..='\x7E').contains(&c)
-//        || !c.is_ascii()
-//}
+fn is_ctext_char(c: char) -> bool {
+    ('\x21'..='\x27').contains(&c)
+        || ('\x2A'..='\x5B').contains(&c)
+        || ('\x5D'..='\x7E').contains(&c)
+        || !c.is_ascii()
+}
 //
 //fn is_ctext(s: &str) -> bool {
 //    s.chars().all(is_ctext_char)
@@ -1372,6 +1596,35 @@ mod tests {
     #[test]
     fn test_good_examples_from_wikipedia_20() {
         is_valid("\"Joe.\\\\Blow\"@example.com", None);
+    }
+
+    #[test]
+    fn test_quoted_local_part_with_display_like_text() {
+        let email = EmailAddress::from_str("\"User <user@example.com>\"@example.com").unwrap();
+
+        assert_eq!(email.display_part(), "");
+        assert_eq!(email.local_part(), "\"User <user@example.com>\"");
+        assert_eq!(email.domain(), "example.com");
+    }
+
+    #[test]
+    fn test_addr_spec_with_comments() {
+        let email = EmailAddress::from_str("user(my account)@example.com(my domain)").unwrap();
+
+        assert_eq!(email.display_part(), "");
+        assert_eq!(email.local_part(), "user");
+        assert_eq!(email.domain(), "example.com");
+        assert_eq!(email.email(), "user@example.com");
+        assert_eq!(email.as_str(), "user(my account)@example.com(my domain)");
+    }
+
+    #[test]
+    fn test_addr_spec_with_nested_comments() {
+        let email = EmailAddress::from_str("(outer (inner)) user @ example.com (domain)").unwrap();
+
+        assert_eq!(email.local_part(), "user");
+        assert_eq!(email.domain(), "example.com");
+        assert_eq!(email.email(), "user@example.com");
     }
 
     #[test]
@@ -1621,11 +1874,50 @@ mod tests {
     }
 
     #[test]
+    fn test_local_part_max_length_can_be_disabled() {
+        valid_with_options(
+            "1234567890123456789012345678901234567890123456789012345678901234+x@example.com",
+            Options::default().without_local_part_max_length(),
+            Some("local part max length check disabled"),
+        );
+    }
+
+    #[test]
     fn test_bad_example_01() {
         expect(
             "foo@example.v1234567890123456789012345678901234567890123456789012345678901234v.com",
             Error::SubDomainTooLong,
             Some("domain part is longer than 64 characters"),
+        );
+    }
+
+    #[test]
+    fn test_domain_label_max_length_can_be_disabled() {
+        valid_with_options(
+            "foo@example.v1234567890123456789012345678901234567890123456789012345678901234v.com",
+            Options::default().without_domain_label_max_length(),
+            Some("domain label max length check disabled"),
+        );
+    }
+
+    #[test]
+    fn test_domain_max_length_can_be_disabled() {
+        let long_domain = "a".repeat(DOMAIN_LABEL_MAX_LENGTH);
+        let address = format!(
+            "foo@{}.{}.{}.{}.com",
+            long_domain, long_domain, long_domain, long_domain
+        );
+
+        expect_with_options(
+            &address,
+            Options::default(),
+            Error::DomainTooLong,
+            Some("domain part is longer than 254 characters"),
+        );
+        valid_with_options(
+            &address,
+            Options::default().without_domain_max_length(),
+            Some("domain max length check disabled"),
         );
     }
 
@@ -1804,6 +2096,15 @@ mod tests {
             Options::default().without_domain_literal(),
             Error::UnsupportedDomainLiteral,
             Some("unsupported domain literal (4)"),
+        );
+    }
+
+    #[test]
+    fn test_bad_example_21() {
+        expect(
+            "user(my account@example.com",
+            Error::InvalidComment,
+            Some("comment is missing closing parenthesis"),
         );
     }
 
