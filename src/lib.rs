@@ -1169,6 +1169,20 @@ fn parse_literal_domain(part: &str) -> Result<(), Error> {
     Error::InvalidCharacter.into()
 }
 
+/// Trim CFWS from the given string slice and return the remaining span.
+///
+/// CFWS is defined by RFC 5322 §3.2.2 as folding white space and comments.
+/// This function removes leading and trailing CFWS around the target token,
+/// including whitespace and valid top-level comments, while preserving the core
+/// content between them.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// # use email_address::{trim_cfws, Error};
+/// let value = " (comment) user@example.com (domain) ";
+/// assert_eq!(trim_cfws(value).unwrap(), "user@example.com");
+/// ```
 fn trim_cfws(part: &str) -> Result<&str, Error> {
     let comments = comment_ranges(part)?;
     let mut start = 0;
