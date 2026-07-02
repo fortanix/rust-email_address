@@ -1235,9 +1235,7 @@ fn trim_cfws_start(part: &str, comments: &[(usize, usize)], mut start: usize, en
             .iter()
             .find(|(comment_start, comment_end)| *comment_start == start && *comment_end <= end)
         {
-            // Move past a complete leading comment. Comment ranges are
-            // pre-validated by `comment_ranges`, and the `comment_end <= end`
-            // check ensures the helper only consumes comments inside bounds.
+            // Move past a complete leading comment.
             start = *comment_end;
             continue;
         }
@@ -1268,9 +1266,7 @@ fn trim_cfws_end(part: &str, comments: &[(usize, usize)], start: usize, mut end:
             .iter()
             .find(|(comment_start, comment_end)| *comment_start >= start && *comment_end == end)
         {
-            // Move before a complete trailing comment. The `comment_start >=
-            // start` check ensures the helper only consumes comments inside
-            // the current bounds.
+            // Move before a complete trailing comment.
             end = *comment_start;
             continue;
         }
