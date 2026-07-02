@@ -1306,9 +1306,9 @@ fn comment_ranges(part: &str) -> Result<Vec<(usize, usize)>, Error> {
 fn parse_comment(part: &str, start: usize) -> Result<usize, Error> {
     let mut depth = 1;
     let mut escaped = false;
-    let mut chars = part[start + LPAREN.len_utf8()..].char_indices();
+    let chars = part[start + LPAREN.len_utf8()..].char_indices();
 
-    while let Some((relative_index, c)) = chars.next() {
+    for (relative_index, c) in chars {
         let index = start + LPAREN.len_utf8() + relative_index;
 
         if escaped {
