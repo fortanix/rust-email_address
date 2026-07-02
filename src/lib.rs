@@ -884,7 +884,7 @@ impl EmailAddress {
     ///
     pub fn local_part(&self) -> &str {
         let (local, _, _) = split_parts(&self.0).unwrap();
-        trim_cfws(local).unwrap()
+        trim_cfws_or_original(local)
     }
 
     ///
@@ -940,7 +940,7 @@ impl EmailAddress {
     ///
     pub fn domain(&self) -> &str {
         let (_, domain, _) = split_parts(&self.0).unwrap();
-        trim_cfws(domain).unwrap()
+        trim_cfws_or_original(domain)
     }
 
     ///
@@ -1169,6 +1169,13 @@ fn parse_literal_domain(part: &str) -> Result<(), Error> {
     Error::InvalidCharacter.into()
 }
 
+fn trim_cfws_or_original(part: &str) -> &str {
+    match trim_cfws(part) {
+        Ok(trimmed) => trimmed,
+        Err(_) => part,
+    }
+}
+
 /// Trim CFWS from the given string slice and return the remaining span.
 ///
 /// CFWS is defined by RFC 5322 §3.2.2 as folding white space and comments.
@@ -1188,6 +1195,10 @@ fn trim_cfws(part: &str) -> Result<&str, Error> {
     let mut start = 0;
     let mut end = part.len();
 
+    // This loop cannot run endlessly: the trim helpers only move the
+    // bounds inward (`start` increases and/or `end` decreases), and the
+    // bounds are limited by the finite length of `part`. If neither bound
+    // moves during an iteration, all surrounding CFWS has been consumed.
     loop {
         let next_start = trim_cfws_start(part, &comments, start, end);
         let next_end = trim_cfws_end(part, &comments, next_start, end);
@@ -1203,10 +1214,18 @@ fn trim_cfws(part: &str) -> Result<&str, Error> {
     Ok(&part[start..end])
 }
 
+/// Trim CFWS from the beginning of `part[start..end]`.
+///
+/// The returned index is always greater than or equal to `start`, which keeps
+/// the caller's outer loop monotonic: each successful trim moves the lower
+/// bound inward and never revisits bytes that have already been consumed.
 fn trim_cfws_start(part: &str, comments: &[(usize, usize)], mut start: usize, end: usize) -> usize {
     while start < end {
         if let Some(c) = part[start..end].chars().next() {
             if is_wsp(c) {
+                // Move past one leading whitespace character. Because this
+                // advances by the UTF-8 width of the current character, the
+                // next iteration starts at a valid character boundary.
                 start += c.len_utf8();
                 continue;
             }
@@ -1216,6 +1235,9 @@ fn trim_cfws_start(part: &str, comments: &[(usize, usize)], mut start: usize, en
             .iter()
             .find(|(comment_start, comment_end)| *comment_start == start && *comment_end <= end)
         {
+            // Move past a complete leading comment. Comment ranges are
+            // pre-validated by `comment_ranges`, and the `comment_end <= end`
+            // check ensures the helper only consumes comments inside bounds.
             start = *comment_end;
             continue;
         }
@@ -1226,10 +1248,17 @@ fn trim_cfws_start(part: &str, comments: &[(usize, usize)], mut start: usize, en
     start
 }
 
+/// Trim CFWS from the end of `part[start..end]`.
+///
+/// The returned index is always less than or equal to `end`, which keeps the
+/// caller's outer loop monotonic: each successful trim moves the upper bound
+/// inward and never expands the slice being inspected.
 fn trim_cfws_end(part: &str, comments: &[(usize, usize)], start: usize, mut end: usize) -> usize {
     while start < end {
         if let Some((last_start, c)) = part[..end].char_indices().next_back() {
             if last_start >= start && is_wsp(c) {
+                // Move before one trailing whitespace character while staying
+                // on the character boundary returned by `char_indices`.
                 end = last_start;
                 continue;
             }
@@ -1239,6 +1268,9 @@ fn trim_cfws_end(part: &str, comments: &[(usize, usize)], start: usize, mut end:
             .iter()
             .find(|(comment_start, comment_end)| *comment_start >= start && *comment_end == end)
         {
+            // Move before a complete trailing comment. The `comment_start >=
+            // start` check ensures the helper only consumes comments inside
+            // the current bounds.
             end = *comment_start;
             continue;
         }
@@ -1639,6 +1671,58 @@ mod tests {
         assert_eq!(email.local_part(), "user");
         assert_eq!(email.domain(), "example.com");
         assert_eq!(email.email(), "user@example.com");
+    }
+
+    #[test]
+    fn test_addr_spec_with_multiple_leading_comments() {
+        let email = EmailAddress::from_str("(comment1)(comment2)a@b.com").unwrap();
+
+        assert_eq!(email.local_part(), "a");
+        assert_eq!(email.domain(), "b.com");
+        assert_eq!(email.email(), "a@b.com");
+    }
+
+    #[test]
+    fn test_addr_spec_with_multiple_trailing_comments() {
+        let email =
+            EmailAddress::from_str("a(comment1)(comment2)@b.com(comment3)(comment4)").unwrap();
+
+        assert_eq!(email.local_part(), "a");
+        assert_eq!(email.domain(), "b.com");
+        assert_eq!(email.email(), "a@b.com");
+    }
+
+    #[test]
+    fn test_addr_spec_with_comments_around_single_atom() {
+        let email = EmailAddress::from_str("(comment1)a(comment2)@b.com").unwrap();
+
+        assert_eq!(email.local_part(), "a");
+        assert_eq!(email.domain(), "b.com");
+        assert_eq!(email.email(), "a@b.com");
+    }
+
+    #[test]
+    fn test_addr_spec_rejects_comment_between_adjacent_atoms() {
+        assert_eq!(
+            EmailAddress::from_str("(comment1)a(comment2)b@c.com"),
+            Error::InvalidCharacter.into()
+        );
+    }
+
+    #[test]
+    fn test_new_unchecked_malformed_local_comment_does_not_panic() {
+        let email = EmailAddress::new_unchecked("a(comment@example.com");
+
+        assert_eq!(email.local_part(), "a(comment");
+        assert_eq!(email.domain(), "example.com");
+    }
+
+    #[test]
+    fn test_new_unchecked_malformed_domain_comment_does_not_panic() {
+        let email = EmailAddress::new_unchecked("a@example.com(comment");
+
+        assert_eq!(email.local_part(), "a");
+        assert_eq!(email.domain(), "example.com(comment");
     }
 
     #[test]
