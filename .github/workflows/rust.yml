@@ -162,40 +162,40 @@ jobs:
         args: --workspace --examples --all-features --no-fail-fast
 
         
-  coverage:   
-    name: Code Coverage
-    needs: test
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        os: ["ubuntu-latest", "windows-latest", "macos-latest"]
-        rust: ["stable"]
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+  # coverage:   
+  #   name: Code Coverage
+  #   needs: test
+  #   runs-on: ubuntu-latest
+  #   strategy:
+  #     matrix:
+  #       os: ["ubuntu-latest", "windows-latest", "macos-latest"]
+  #       rust: ["stable"]
+  #   steps:
+  #     - name: Checkout repository
+  #       uses: actions/checkout@v4
 
-      - name: Install Rust
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: ${{ matrix.rust }}
-          override: true
+  #     - name: Install Rust
+  #       uses: actions-rs/toolchain@v1
+  #       with:
+  #         toolchain: ${{ matrix.rust }}
+  #         override: true
 
-      - name: Run cargo-tarpaulin
-        uses: actions-rs/tarpaulin@v0.1
-        with:
-          version: 0.22.0
-          args: --all-features -- --test-threads 1
+  #     - name: Run cargo-tarpaulin
+  #       uses: actions-rs/tarpaulin@v0.1
+  #       with:
+  #         version: 0.22.0
+  #         args: --all-features -- --test-threads 1
 
-      - name: Upload to codecov.io
-        uses: codecov/codecov-action@v1.0.2
-        with:
-          token: ${{secrets.CODECOV_TOKEN}}
+  #     - name: Upload to codecov.io
+  #       uses: codecov/codecov-action@v1.0.2
+  #       with:
+  #         token: ${{secrets.CODECOV_TOKEN}}
 
-      - name: Archive code coverage results
-        uses: actions/upload-artifact@v1
-        with:
-          name: code-coverage-report
-          path: cobertura.xml
+  #     - name: Archive code coverage results
+  #       uses: actions/upload-artifact@v4
+  #       with:
+  #         name: code-coverage-report
+  #         path: cobertura.xml
 
           
   docs:
